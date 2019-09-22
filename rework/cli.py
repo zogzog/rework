@@ -2,6 +2,7 @@
 from __future__ import print_function
 
 import imp
+import json
 from time import sleep
 import tzlocal
 from pathlib import Path
@@ -10,7 +11,7 @@ import click
 from colorama import init, Fore, Style
 from pkg_resources import iter_entry_points
 
-from sqlalchemy import create_engine
+from sqlhelp.pg import pgengine
 from sqlhelp import update
 
 from rework import api
@@ -49,7 +50,7 @@ def rework():
 @click.pass_context
 def init_db(ctx, dburi):
     " initialize a postgres database with everything needed "
-    engine = create_engine(find_dburi(dburi))
+    engine = pgengine(find_dburi(dburi))
     schema.init(engine, drop=True)
 
 
@@ -68,7 +69,7 @@ def register_operations(dburi, module, domain=None, asdomain=None):
     The registered operations will be relative to the current host.
     """
     mod = imp.load_source('operations', module)
-    engine = create_engine(find_dburi(dburi))
+    engine = pgengine(find_dburi(dburi))
     ok, ko = api.freeze_operations(engine, domain)
 
     print('registered {} new operation ({} already known)'.format(
@@ -103,7 +104,7 @@ def new_worker(**config):
 @click.option('--debugfile')
 def monitor(dburi, **config):
     " start a monitor controlling min/max workers "
-    engine = create_engine(find_dburi(dburi))
+    engine = pgengine(find_dburi(dburi))
     monitor = Monitor(engine, **config)
     monitor.run()
 
@@ -112,9 +113,9 @@ def monitor(dburi, **config):
 @click.argument('dburi')
 def list_operations(dburi):
     init()
-    engine = create_engine(find_dburi(dburi))
+    engine = pgengine(find_dburi(dburi))
     sql = 'select id, host, name, path from rework.operation'
-    for oid, hostid, opname, modpath in engine.execute(sql):
+    for oid, hostid, opname, modpath in engine.execute(sql).fetchall():
         print(Fore.WHITE + '{}'.format(oid), end=' ')
         print(Fore.GREEN + 'host({}) `{}` path({})'.format(oid, hostid, opname, modpath))
     print(Style.RESET_ALL)
@@ -124,12 +125,12 @@ def list_operations(dburi):
 @click.argument('dburi')
 def list_workers(dburi):
     init()
-    engine = create_engine(find_dburi(dburi))
+    engine = pgengine(find_dburi(dburi))
     sql = ('select id, host, pid, mem, debugport, running, shutdown, traceback, '
            'deathinfo, created, started, finished '
            'from rework.worker order by id, running')
     for (wid, host, pid, mem, debugport, running, shutdown, traceback,
-         deathinfo, created, started, finished) in engine.execute(sql):
+         deathinfo, created, started, finished) in engine.execute(sql).fetchall():
         color = Fore.GREEN
         dead = not running and pid
         activity = '(idle)'
@@ -173,34 +174,36 @@ def list_workers(dburi):
 @click.argument('dburi')
 def list_monitors(dburi):
     init()
-    engine = create_engine(find_dburi(dburi))
+    engine = pgengine(find_dburi(dburi))
     sql = ('select id, domain, options, lastseen from rework.monitor')
     now = utcnow().astimezone(TZ)
-    for mid, domain, options, lastseen in engine.execute(sql):
-        color = Fore.GREEN
-        delta = (now - lastseen).total_seconds()
-        if delta > 60:
-            color = Fore.RED
-        elif delta > 10:
-            color = Fore.MAGENTA
-        print(mid,
-              color + lastseen.astimezone(TZ).strftime('%Y-%m-%d %H:%M:%S%z'), end=' ')
-        print(Style.RESET_ALL, end=' ')
-        print(domain, 'options({})'.format(
-            ', '.join('{}={}'.format(k, v) for k, v in options.items()))
-        )
+    with engine.begin() as cn:
+        for mid, domain, options, lastseen in cn.execute(sql).fetchall():
+            color = Fore.GREEN
+            delta = (now - lastseen).total_seconds()
+            if delta > 60:
+                color = Fore.RED
+            elif delta > 10:
+                color = Fore.MAGENTA
+            print(mid,
+                  color + lastseen.astimezone(TZ).strftime('%Y-%m-%d %H:%M:%S%z'), end=' ')
+            print(Style.RESET_ALL, end=' ')
+            print(domain, 'options({})'.format(
+                ', '.join('{}={}'.format(k, v)
+                          for k, v in json.loads(options).items()))
+            )
 
 
 @rework.command(name='shutdown-worker')
 @click.argument('dburi')
-@click.argument('worker-id')
+@click.argument('worker-id', type=int)
 def shutdown_worker(dburi, worker_id):
     """ ask a worker to shut down as soon as it becomes idle
 
     If you want to immediately and unconditionally terminate
     a worker, use `rework kill-worker`
     """
-    engine = create_engine(find_dburi(dburi))
+    engine = pgengine(find_dburi(dburi))
     with engine.begin() as cn:
         update('rework.worker').where(id=worker_id).values(
             shutdown=True
@@ -209,14 +212,14 @@ def shutdown_worker(dburi, worker_id):
 
 @rework.command(name='kill-worker')
 @click.argument('dburi')
-@click.argument('worker-id')
+@click.argument('worker-id', type=int)
 def kill_worker(dburi, worker_id):
     """ ask to preemptively kill a given worker to its monitor
 
     If you want to not risk interrupting any ongoing work,
     you should use `rework shutdown` instead.
     """
-    engine = create_engine(find_dburi(dburi))
+    engine = pgengine(find_dburi(dburi))
     with engine.begin() as cn:
         update('rework.worker').where(id=worker_id).values(
             kill=True
@@ -239,10 +242,10 @@ status_color = {
 @click.option('--logcount/--no-logcount', default=False)
 def list_tasks(dburi, tracebacks=False, logcount=False):
     init()
-    engine = create_engine(find_dburi(dburi))
+    engine = pgengine(find_dburi(dburi))
     opmap = dict(engine.execute('select id, name from rework.operation').fetchall())
     sql = ('select id from rework.task order by id')
-    for tid, in engine.execute(sql):
+    for tid, in engine.execute(sql).fetchall():
         task = Task.byid(engine, tid)
         stat = task.state
         print(Style.RESET_ALL + str(tid),
@@ -277,7 +280,7 @@ def list_tasks(dburi, tracebacks=False, logcount=False):
 @click.option('--watch', is_flag=True, default=False)
 @click.option('--fromid', type=int)
 def log_task(dburi, taskid, fromid=None, watch=False):
-    engine = create_engine(find_dburi(dburi))
+    engine = pgengine(find_dburi(dburi))
     task = Task.byid(engine, taskid)
 
     def watchlogs(fromid):
@@ -310,7 +313,7 @@ def abort_task(dburi, taskid):
     This will be done by doing a preemptive kill on
     its associated worker.
     """
-    engine = create_engine(find_dburi(dburi))
+    engine = pgengine(find_dburi(dburi))
     task = Task.byid(engine, taskid)
     task.abort()
 
@@ -331,7 +334,7 @@ def vacuum(dburi, workers=False, tasks=False, finished=None):
               'at the same time')
         return
 
-    engine = create_engine(find_dburi(dburi))
+    engine = pgengine(find_dburi(dburi))
     if finished is None:
         finished = utcnow()
     if workers:

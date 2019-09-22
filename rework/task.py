@@ -1,6 +1,7 @@
 import sys
 import imp
 import time
+import json
 from pickle import dumps, loads
 import traceback as tb
 from contextlib import contextmanager
@@ -35,8 +36,21 @@ class Task(object):
         self.tid = tid
         self.operation = operation
 
+    @property
+    def opname(self):
+        with self.engine.begin() as cn:
+            return select(
+                'name'
+            ).table(
+                'rework.operation'
+            ).where(
+                id=self.operation
+            ).do(cn).scalar()
+
     def __repr__(self):
-        return 'Task({}, {})'.format(self.operation, self.state)
+        return 'Task({}, `{}`, worker={}, {})'.format(
+            self.tid, self.opname, self._propvalue('worker'), self.state
+        )
 
     @classmethod
     def fromqueue(cls, engine, wid, domain='default'):
@@ -159,7 +173,7 @@ class Task(object):
         meta = self._propvalue('metadata')
         if meta is None:
             return {}
-        return meta
+        return json.loads(meta)
 
     @property
     def status(self):
@@ -270,14 +284,15 @@ class Task(object):
                 started=utcnow()
             ).do(cn)
         try:
-            name, path = self.engine.execute("""
-                select name, path
-                from rework.operation
-                where rework.operation.id = %(operation)s
-            """, {'operation': self.operation}
-            ).fetchone()
-            mod = imp.load_source('module', path)
-            func = getattr(mod, name)
+            with self.engine.begin() as cn:
+                name, path = cn.execute(
+                    'select name, path '
+                    'from rework.operation '
+                    'where rework.operation.id = %(operation)s',
+                    {'operation': self.operation}
+                ).fetchone()
+                mod = imp.load_source('module', path)
+                func = getattr(mod, name)
             func(self)
         except:
             with self.engine.begin() as cn:

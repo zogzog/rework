@@ -7,8 +7,7 @@ import traceback
 
 from pathlib import Path
 
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from asyncpg import exceptions as dberror
 
 from sqlhelp import select, insert
 
@@ -114,21 +113,22 @@ def schedule(engine,
 
     with engine.begin() as cn:
         opids = q.do(cn).fetchall()
-        if len(opids) > 1:
-            if hostid is None:
-                return schedule(
-                    engine,
-                    opname,
-                    rawinputdata=rawinputdata,
-                    hostid=host(),
-                    module=module,
-                    domain=domain,
-                    metadata=metadata
-                )
-            raise ValueError('Ambiguous operation selection')
-        if not len(opids):
-            raise Exception('No operation was found for these parameters')
-        opid = opids[0][0]
+    if len(opids) > 1:
+        if hostid is None:
+            return schedule(
+                engine,
+                opname,
+                rawinputdata=rawinputdata,
+                hostid=host(),
+                module=module,
+                domain=domain,
+                metadata=metadata
+            )
+        raise ValueError('Ambiguous operation selection')
+    if not len(opids):
+        raise Exception('No operation was found for these parameters')
+    opid = opids[0][0]
+    with engine.begin() as cn:
         q = insert(
             'rework.task'
         ).values(
@@ -185,7 +185,7 @@ def freeze_operations(engine, domain=None, domain_map=None,
                 )
                 q.do(cn)
                 recorded.append(value)
-            except IntegrityError:
+            except dberror.UniqueViolationError:
                 alreadyknown.append(value)
 
     return recorded, alreadyknown

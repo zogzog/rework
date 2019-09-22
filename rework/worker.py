@@ -4,13 +4,11 @@ from contextlib import contextmanager
 import traceback
 
 import pystuck
-from sqlalchemy import create_engine, select
-
+from sqlhelp.pg import pgengine
 from sqlhelp import select, update
 
 from rework.helper import (
     has_ancestor_pid,
-    kill,
     memory_usage,
     utcnow
 )
@@ -28,7 +26,7 @@ class Worker:
         self.maxmem = maxmem
         self.domain = domain
         self.debugport = debug_port
-        self.engine = create_engine(dburi)
+        self.engine = pgengine(dburi)
 
     def running_sql(self, running):
         value = {
@@ -65,9 +63,12 @@ class Worker:
             ).do(cn)
 
     def shutdown_asked(self):
-        return select('shutdown').table('rework.worker').where(
-            id=self.wid
-        ).do(self.engine).scalar()
+        with self.engine.begin() as cn:
+            return select('shutdown').table(
+                'rework.worker'
+            ).where(
+                id=self.wid
+            ).do(cn).scalar()
 
     def die_if_shutdown(self):
         if self.shutdown_asked():
@@ -88,7 +89,6 @@ class Worker:
     def run(self):
         if self.debugport:
             pystuck.run_server(port=self.debugport)
-
         try:
             with self.running_status():
                 self.main_loop()
@@ -98,7 +98,7 @@ class Worker:
                     traceback=traceback.format_exc()
                 ).do(cn)
             raise
-        except SystemExit as exit:
+        except SystemExit:
             raise
 
     def heartbeat(self):

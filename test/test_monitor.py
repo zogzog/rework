@@ -2,6 +2,7 @@ from datetime import datetime
 from pathlib import Path
 import threading
 import time
+import json
 
 import pytest
 from sqlhelp import insert, update
@@ -157,7 +158,7 @@ def test_monitor_base(engine):
             'debugport': 0,
             'maxworkers': 1,
             'minworkers': 1
-        } == res
+        } == json.loads(res)
 
     # generic monitor assertions
     guard(engine, 'select count(id) from rework.monitor where id = {}'.format(mon.monid),

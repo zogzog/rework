@@ -11,6 +11,7 @@ import pytz
 import psutil
 
 from sqlhelp import select, insert, update
+from sqlhelp.pg import pgengine
 
 from rework.helper import (
     cpu_usage,
@@ -36,7 +37,9 @@ def mark_dead_workers(cn, wids, message, traceback=None):
     if not wids:
         return
     # mark workers as dead
-    update('rework.worker').where('id in %(ids)s', ids=tuple(wids)).values(
+    update('rework.worker').where(
+        'id = any(%(ids)s::int[])', ids=wids
+    ).values(
         running=False,
         finished=utcnow(),
         deathinfo=message
@@ -48,7 +51,7 @@ def mark_dead_workers(cn, wids, message, traceback=None):
     ).where(
         "task.status != 'done'",
         'worker.id = task.worker',
-        'worker.id in %(ids)s',
+        'worker.id = any(%(ids)s::int[])',
         ids=tuple(wids),
     ).values(
         finished=utcnow(),
@@ -95,7 +98,7 @@ class Monitor(object):
                  minworkers=None, maxworkers=2,
                  maxruns=0, maxmem=0, debug=False,
                  debugfile=None):
-        self.engine = engine
+        self.engine = pgengine(engine.url)
         self.domain = domain
         self.maxworkers = maxworkers
         self.minworkers = minworkers if minworkers is not None else maxworkers
@@ -174,16 +177,16 @@ class Monitor(object):
         if not self.workers:
             return []
         q = select('worker.id').table(
-                'rework.worker as worker'
-            ).join(
-                'rework.task as task on (worker.id = task.worker)'
-            ).where(
-                'worker.id in %(ids)s', ids=tuple(self.wids)
-            ).where(
-                "task.status != 'done'"
-            )
+            'rework.worker as worker'
+        ).join(
+            'rework.task as task on (worker.id = task.worker)'
+        ).where(
+            'worker.id = any(%(ids)s::int[])', ids=self.wids
+        ).where(
+            "task.status != 'done'"
+        )
         return [
-            row.id for row in
+            row['id'] for row in
             q.do(cn).fetchall()
         ]
 
@@ -191,10 +194,10 @@ class Monitor(object):
         q = select(
             'id'
         ).table('rework.worker'
-        ).where('id in %(ids)s', ids=tuple(self.wids))
+        ).where('id = any(%(ids)s::int[])', ids=tuple(self.wids))
 
         if busylist:
-            q.where('not id in %(nid)s', nid=tuple(busylist))
+            q.where('not id = any(%(nid)s::int[])', nid=tuple(busylist))
         q.where(shutdown=False)
         q.limit(1)
         return q.do(cn).scalar()
@@ -235,6 +238,23 @@ class Monitor(object):
             with self.engine.begin() as cn:
                 q.do(cn)
 
+    def workers_info(self):
+        if not self.workers:
+            return []
+        res = []
+        for wid, proc in self.workers.items():
+            q = select(
+                'id', 'mem', 'cpu', 'running',
+                'kill', 'traceback', 'deathinfo', 'created',
+                'started', 'finished'
+            ).table(
+                'rework.worker'
+            ).where(id=wid)
+            with self.engine.begin() as cn:
+                w = q.do(cn).fetchone()
+                res.append(dict(w))
+        return res
+
     def track_timeouts(self):
         if not self.workers:
             return
@@ -249,12 +269,13 @@ class Monitor(object):
             ','.join(str(wid) for wid in self.wids)
         )
         with self.engine.begin() as cn:
-            for tid, start_time, timeout in cn.execute(sql).fetchall():
-                start_time = start_time.astimezone(pytz.utc)
-                delta = parse_delta(timeout)
-                now = utcnow()
-                if (now - start_time) > delta:
-                    Task.byid(self.engine, tid).abort()
+            items = cn.execute(sql).fetchall()
+        for tid, start_time, timeout in items:
+            start_time = start_time.astimezone(pytz.utc)
+            delta = parse_delta(timeout)
+            now = utcnow()
+            if (now - start_time) > delta:
+                Task.byid(self.engine, tid).abort()
 
     def ensure_workers(self):
         # rid self.workers of dead things
@@ -322,16 +343,16 @@ class Monitor(object):
     def preemptive_kill(self):
         if not self.wids:
             return
-        q = select('id' ).table('rework.worker').where(
+        q = select('id').table('rework.worker').where(
             'kill = true',
             'running = true'
         ).where(
-            'id in %(ids)s', ids=tuple(self.wids)
+            'id = any(%(ids)s::int[])', ids=tuple(self.wids)
         )
         killed = []
         with self.engine.begin() as cn:
             for row in q.do(cn).fetchall():
-                wid = row.id
+                wid = row['id']
                 proc = self.workers.pop(wid)
                 if not kill_process_tree(proc.pid):
                     print('could not kill {}'.format(proc.pid))

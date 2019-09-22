@@ -11,7 +11,7 @@ import pytz
 import psutil
 from sqlalchemy.engine import url
 from inireader import reader
-
+from sqlhelp.pg import pgengine
 
 def utcnow():
     return datetime.utcnow().replace(tzinfo=pytz.utc)
@@ -234,6 +234,15 @@ class PGLogHandler(logging.Handler):
             '%(name)s:%(levelname)s: %(asctime)s: %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
+        p = Path(f'~/tasklog.{self.task.tid}').expanduser()
+
+    def _debug(self, things):
+        """a debug helper, useful since this typically runs from a subprocess
+        out opf reach of pdb
+        """
+        p = Path(f'~/tasklog.{self.task.tid}').expanduser()
+        with p.open('ab') as f:
+            f.write(str(things).encode('utf-8') + b'\n')
 
     def emit(self, record):
         self.queue.append(record)
@@ -253,20 +262,13 @@ class PGLogHandler(logging.Handler):
         self.queue = []
         self.lastflush = time.time()
 
-        def writeback_log(values, engine):
-            with engine.begin() as cn:
-                sql = ('insert into rework.log '
-                       '(task, tstamp, line) '
-                       'values (%(task)s, %(tstamp)s, %(line)s)')
-                cn.execute(sql, values)
-
-        th = Thread(target=writeback_log,
-                    args=(values, self.task.engine))
-        th.daemon = True
-        # fire and forget
-        th.start()
-        if self.sync:
-            th.join()
+        with self.task.engine.begin() as cn:
+            sql = ('insert into rework.log '
+                   '(task, tstamp, line) '
+                   'values (%(task)s, %(tstamp)s, %(line)s)')
+            for val in values:
+                self._debug(val)
+                cn.execute(sql, val)
 
     def close(self):
         pass

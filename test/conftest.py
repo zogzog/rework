@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-from sqlalchemy import create_engine
+from sqlhelp.pg import pgengine
 
 from pytest_sa_pg import db
 
@@ -23,7 +23,7 @@ def engine(request):
         'timezone': 'UTC',
         'log_timezone': 'UTC'
     })
-    e = create_engine('postgresql://localhost:{}/postgres'.format(PORT))
+    e = pgengine('postgresql://localhost:{}/postgres'.format(PORT))
     schema.init(e, drop=True)
     api.freeze_operations(e)
     # help the `cleanup` fixture
